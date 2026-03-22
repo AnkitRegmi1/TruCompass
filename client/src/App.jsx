@@ -663,6 +663,11 @@ function App() {
 
   function completeOnboarding() {
     if (!studentName.trim() || !calendarConnected) {
+      setVoiceStatus(
+        !studentName.trim()
+          ? "Add your name first, then enter the app."
+          : "Connect Google Calendar first, then enter the app.",
+      );
       return;
     }
 
@@ -1450,7 +1455,6 @@ function App() {
               </button>
               <button
                 className="secondary-button"
-                disabled={!studentName.trim() || !calendarConnected}
                 onClick={completeOnboarding}
                 type="button"
               >
