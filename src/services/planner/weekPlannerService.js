@@ -5,6 +5,7 @@ import {
 } from "../../lib/time/timeZone.js";
 
 const LLM_SUMMARY_TIMEOUT_MS = 12_000;
+const PLANNER_SOURCE_TIMEOUT_MS = 12_000;
 
 async function withTimeout(promise, timeoutMs, fallbackValue = null) {
   let timeoutId;
@@ -20,9 +21,9 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
   }
 }
 
-async function safeServiceCall(factory, fallbackValue) {
+async function safeServiceCall(factory, fallbackValue, timeoutMs = PLANNER_SOURCE_TIMEOUT_MS) {
   try {
-    return await factory();
+    return await withTimeout(factory(), timeoutMs, fallbackValue);
   } catch {
     return fallbackValue;
   }
@@ -1070,11 +1071,21 @@ export class WeekPlannerService {
     const weekSchedule = await Promise.all(
       weekDates.map(async (day) =>
         userId
-          ? this.googleCalendarService.getDailySchedule({
-              userId,
-              date: day,
-              timeZone: resolvedTimeZone,
-            })
+          ? safeServiceCall(
+              () =>
+                this.googleCalendarService.getDailySchedule({
+                  userId,
+                  date: day,
+                  timeZone: resolvedTimeZone,
+                }),
+              {
+                calendarConnected: false,
+                busyBlocks: [],
+                freeBlocks: [],
+                date: day,
+                timeZone: resolvedTimeZone,
+              },
+            )
           : {
               calendarConnected: false,
               busyBlocks: [],
@@ -1112,11 +1123,21 @@ export class WeekPlannerService {
     const weekSchedule = await Promise.all(
       weekDates.map(async (day) =>
         userId
-          ? this.googleCalendarService.getDailySchedule({
-              userId,
-              date: day,
-              timeZone: resolvedTimeZone,
-            })
+          ? safeServiceCall(
+              () =>
+                this.googleCalendarService.getDailySchedule({
+                  userId,
+                  date: day,
+                  timeZone: resolvedTimeZone,
+                }),
+              {
+                calendarConnected: false,
+                busyBlocks: [],
+                freeBlocks: [],
+                date: day,
+                timeZone: resolvedTimeZone,
+              },
+            )
           : {
               calendarConnected: false,
               busyBlocks: [],
@@ -1208,7 +1229,16 @@ export class WeekPlannerService {
     );
 
     const [newsletter, librarySnapshot, academicCalendar] = await Promise.all([
-      this.newsletterService.getIssue({ forceRefresh }),
+      safeServiceCall(
+        () => this.newsletterService.getIssue({ forceRefresh }),
+        {
+          title: "Newsletter unavailable",
+          issueUrl: this.newsletterService.issueUrl,
+          articleCount: 0,
+          articles: [],
+          source: "fallback",
+        },
+      ),
       this.libraryService.getTodaySnapshot().catch(() => ({
         url: this.libraryService.url,
         hours: "Hours not found",
