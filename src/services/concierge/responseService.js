@@ -60,6 +60,34 @@ function formatAthleticsHighlights(events) {
     .join("\n");
 }
 
+function formatTruViewHighlights(items) {
+  if (!items?.length) {
+    return "None";
+  }
+
+  return items
+    .map((item) => {
+      const label = item.title || item.summary || "TruView item";
+      const detail = item.summary && item.summary !== label ? ` :: ${item.summary}` : "";
+      return `- ${label}${item.displayTime ? ` (${item.displayTime})` : ""}${detail}`;
+    })
+    .join("\n");
+}
+
+function getPreviousTurn(messages = []) {
+  const previousAssistant = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  const previousUser = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+
+  return {
+    previousAssistant: previousAssistant?.text ?? "None",
+    previousUser: previousUser?.text ?? "None",
+  };
+}
+
 function buildFallbackText({
   requestType,
   intent,
@@ -72,6 +100,8 @@ function buildFallbackText({
   fittingEvents,
   fittingAthleticsEvents,
   campusUpdates,
+  truViewEvents,
+  truViewHighlights,
   date,
   meetingDraft,
   timeAwarenessNote,
@@ -119,6 +149,13 @@ function buildFallbackText({
           .map((event) => `${event.summary} (${event.displayTime})`)
           .join(", ")}.`
       : "";
+  const truViewEventText =
+    intent === "GENERAL" && !campusEvents.length && !athleticsEvents.length && truViewEvents?.length
+      ? ` TruView also has: ${truViewEvents
+          .slice(0, 3)
+          .map((event) => `${event.summary} (${event.displayTime})`)
+          .join(", ")}.`
+      : "";
   const timeAwareWrapText =
     intent === "GENERAL" && hadEarlierEventsToday
       ? " The scheduled events for earlier today have already wrapped up."
@@ -141,9 +178,14 @@ function buildFallbackText({
         .slice(0, 3)
         .map((update) => update.title)
         .join(", ")}.`
+    : truViewHighlights?.length
+      ? ` TruView highlights: ${truViewHighlights
+          .slice(0, 3)
+          .map((item) => item.title || item.summary)
+          .join(", ")}.`
     : "";
 
-  return `${intro}${timeAwarenessNote ? ` ${timeAwarenessNote}` : ""}${eventHighlights}${athleticsHighlights}${timeAwareWrapText}${mainEventText}${fittingEventText}${updateText}`;
+  return `${intro}${timeAwarenessNote ? ` ${timeAwarenessNote}` : ""}${eventHighlights}${athleticsHighlights}${truViewEventText}${timeAwareWrapText}${mainEventText}${fittingEventText}${updateText}`;
 }
 
 export class ResponseService {
@@ -157,6 +199,9 @@ export class ResponseService {
       role: message.role === "assistant" ? "model" : "user",
       parts: [{ text: message.text }],
     }));
+    const { previousAssistant, previousUser } = getPreviousTurn(
+      context.conversationMessages,
+    );
 
     return [
       ...conversationContents,
@@ -171,6 +216,9 @@ export class ResponseService {
               `Intent: ${context.intent}`,
               `Calendar connected: ${context.calendarConnected ? "yes" : "no"}`,
               `Current local time note: ${context.timeAwarenessNote ?? "Not needed"}`,
+              `Previous user turn: ${previousUser}`,
+              `Previous assistant turn: ${previousAssistant}`,
+              "Conversation guidance: If this is a follow-up, answer only what changed or what the user just asked. Do not repeat the same summary unless it is necessary.",
               `Current question: ${context.question}`,
               `Meeting draft: ${JSON.stringify(context.meetingDraft ?? null)}`,
               `Free blocks:\n${formatFreeBlocks(context.freeBlocks)}`,
@@ -182,6 +230,8 @@ export class ResponseService {
               `Schedule-friendly events:\n${formatEventList(context.fittingEvents)}`,
               `Schedule-friendly athletics:\n${formatEventList(context.fittingAthleticsEvents ?? [])}`,
               `Campus updates:\n${formatCampusUpdates(context.campusUpdates)}`,
+              `TruView events:\n${formatCampusEventHighlights(context.truViewEvents ?? [])}`,
+              `TruView highlights:\n${formatTruViewHighlights(context.truViewHighlights ?? [])}`,
             ].join("\n\n"),
           },
         ],

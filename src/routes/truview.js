@@ -15,5 +15,17 @@ export function createTruViewRouter({ truViewService }) {
     }
   });
 
+  router.get("/public", async (request, response, next) => {
+    try {
+      const forceRefresh = request.query.refresh === "true";
+      const context = await truViewService.getPublicContext({
+        forceRefresh,
+      });
+      response.json(context);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   return router;
 }

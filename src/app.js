@@ -190,6 +190,7 @@ export function createApp() {
 
   const conciergeService = new ConciergeService({
     trumanEventsService,
+    truViewService,
     googleCalendarService,
     campusRecService,
     diningService,

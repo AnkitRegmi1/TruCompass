@@ -13,6 +13,7 @@ const ATHLETICS_QUERY_PATTERN =
   /\b(athletics|bulldogs|game|games|match|matches|sport|sports|football|soccer|basketball|softball|volleyball|tennis|wrestling|baseball|swimming|track)\b/i;
 const NEWSLETTER_QUERY_PATTERN =
   /\b(newsletter|truman today|announcement|announcements|news|headline|headlines)\b/i;
+const TRUVIEW_QUERY_PATTERN = /\b(truview|tru\s?view|truhacks|portal)\b/i;
 const WEEK_PLAN_QUERY_PATTERN =
   /\b(plan my week|weekly plan|week plan|plan out my week|help me plan my week)\b/i;
 const ATHLETICS_SPORT_KEYWORDS = [
@@ -308,6 +309,76 @@ function summarizeTimeAwareness(allEvents, activeEvents, dateKey, timeZone) {
   })}, I am not seeing anything posted for the rest of today.`;
 }
 
+function dedupeEvents(events = []) {
+  const seen = new Set();
+
+  return events.filter((event) => {
+    const key = [
+      event?.summary ?? event?.title ?? "",
+      event?.startsAt ?? event?.displayTime ?? "",
+      event?.location ?? "",
+    ]
+      .join("|")
+      .toLowerCase()
+      .trim();
+
+    if (!key || seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeTruViewEvents(events = []) {
+  return events
+    .filter((event) => event?.summary)
+    .map((event) => ({
+      ...event,
+      isMainEvent: event.isMainEvent ?? false,
+      location: event.location || "TruView",
+    }));
+}
+
+function formatTruViewDirectAnswer({ question, truViewContext }) {
+  const normalizedQuestion = String(question ?? "").toLowerCase().trim();
+  const highlights = truViewContext?.highlights ?? [];
+  const matchingHighlights = highlights
+    .map((item) => ({
+      item,
+      score: scoreMatch(
+        normalizedQuestion,
+        `${item.title ?? item.summary ?? ""} ${item.summary ?? ""} ${item.location ?? ""}`,
+      ),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  if (matchingHighlights.length) {
+    const match = matchingHighlights[0].item;
+    const label = match.title ?? match.summary ?? "TruView item";
+    return `${label}${match.summary ? `. ${match.summary}` : ""}${match.displayTime ? ` ${match.displayTime}.` : ""}${match.url ? ` More here: ${match.url}` : ""}`;
+  }
+
+  if (highlights.length) {
+    return `I checked TruView too. Public TruView highlights right now include: ${highlights
+      .slice(0, 4)
+      .map((item) => item.title)
+      .join("; ")}.`;
+  }
+
+  const enabledFeatures = Object.entries(truViewContext?.snapshot?.features ?? {})
+    .filter(([, enabled]) => Boolean(enabled))
+    .map(([feature]) => feature);
+
+  if (enabledFeatures.length) {
+    return `I checked TruView's public portal signals, but I did not find a matching public item there right now. Its public features currently include ${enabledFeatures.join(", ")}.`;
+  }
+
+  return "I checked TruView, but I did not find any public TruView items I could use for that right now.";
+}
+
 function getRelevantEventsForAnswer(allEvents, activeEvents, dateKey, timeZone) {
   if (dateKey === getTodayDateKey(timeZone)) {
     return activeEvents;
@@ -319,6 +390,7 @@ function getRelevantEventsForAnswer(allEvents, activeEvents, dateKey, timeZone) 
 export class ConciergeService {
   constructor({
     trumanEventsService,
+    truViewService,
     googleCalendarService,
     campusRecService,
     diningService,
@@ -333,6 +405,7 @@ export class ConciergeService {
     defaultTimeZone,
   }) {
     this.trumanEventsService = trumanEventsService;
+    this.truViewService = truViewService;
     this.googleCalendarService = googleCalendarService;
     this.campusRecService = campusRecService;
     this.diningService = diningService;
@@ -380,6 +453,7 @@ export class ConciergeService {
         ));
     const isAthleticsQuery = ATHLETICS_QUERY_PATTERN.test(question);
     const isNewsletterQuery = NEWSLETTER_QUERY_PATTERN.test(question);
+    const isTruViewQuery = TRUVIEW_QUERY_PATTERN.test(question);
     const isWeekPlanQuery = WEEK_PLAN_QUERY_PATTERN.test(question);
     const intent = this.intentService.classifyIntent(question);
 
@@ -511,7 +585,8 @@ export class ConciergeService {
     }
 
     const needsCalendar = intent === "SPECIFIC" && Boolean(userId);
-    const [eventsForDate, athleticsEventsForDate, feedUpdates, schedule] = await Promise.all([
+    const [eventsForDate, athleticsEventsForDate, feedUpdates, truViewContext, schedule] =
+      await Promise.all([
       this.trumanEventsService.getEventsForDate({
         date: resolvedDate,
         timeZone: resolvedTimeZone,
@@ -527,6 +602,9 @@ export class ConciergeService {
         timeZone: resolvedTimeZone,
         forceRefresh: forceRefreshEvents,
       }),
+      this.truViewService?.getPublicContext({
+        forceRefresh: forceRefreshEvents,
+      }) ?? Promise.resolve(null),
       needsCalendar
         ? this.googleCalendarService.getDailySchedule({
             userId,
@@ -540,10 +618,26 @@ export class ConciergeService {
             date: resolvedDate,
             timeZone: resolvedTimeZone,
           }),
+      ]);
+
+    const truViewUpdates = (truViewContext?.notices?.notices ?? []).map((notice) => ({
+      title: notice.title,
+      summary: notice.summary,
+      url: notice.url,
+      feedTitle: "TruView",
+      displayTime: notice.displayTime,
+      category: "TruView",
+      sourceType: "truview-notice",
+    }));
+    const mergedCampusUpdates = [...truViewUpdates, ...(feedUpdates.updates ?? [])];
+    const truViewEvents = normalizeTruViewEvents(truViewContext?.events?.events ?? []);
+    const combinedCampusEvents = dedupeEvents([
+      ...(eventsForDate.events ?? []),
+      ...truViewEvents,
     ]);
 
     if (isAthleticsQuery && !isSchedulingRequest) {
-      const athleticsUpdates = feedUpdates.updates.filter(
+      const athleticsUpdates = mergedCampusUpdates.filter(
         (update) => update.category === "Athletics",
       );
       const activeAthleticsEvents = prioritizeTodayEvents(
@@ -591,8 +685,39 @@ export class ConciergeService {
       };
     }
 
+    if (isTruViewQuery && !isSchedulingRequest) {
+      const textResponse = formatTruViewDirectAnswer({
+        question,
+        truViewContext,
+      });
+      const audio = includeAudio
+        ? await this.audioService.synthesize(textResponse)
+        : null;
+      const updatedConversation = await this.conversationStoreService.appendTurn(
+        conversation.conversationId,
+        question,
+        textResponse,
+      );
+
+      return {
+        conversationId: conversation.conversationId,
+        conversation: updatedConversation,
+        requestType: "TRUVIEW",
+        question,
+        intent,
+        date: resolvedDate,
+        timeZone: resolvedTimeZone,
+        truView: truViewContext,
+        textResponse,
+        audio,
+        metadata: {
+          source: truViewContext?.snapshot?.source ?? "truview",
+        },
+      };
+    }
+
     const activeCampusEvents = prioritizeTodayEvents(
-      eventsForDate.events,
+      combinedCampusEvents,
       resolvedDate,
       resolvedTimeZone,
     );
@@ -602,7 +727,7 @@ export class ConciergeService {
       resolvedTimeZone,
     );
     const relevantCampusEvents = getRelevantEventsForAnswer(
-      eventsForDate.events,
+      combinedCampusEvents,
       activeCampusEvents,
       resolvedDate,
       resolvedTimeZone,
@@ -648,16 +773,18 @@ export class ConciergeService {
       calendarConnected: schedule.calendarConnected,
       meetingDraft,
       freeBlocks: schedule.freeBlocks,
-      campusEvents: eventsForDate.events,
-      allCampusEvents: eventsForDate.events,
+      campusEvents: relevantCampusEvents,
+      allCampusEvents: combinedCampusEvents,
       athleticsEvents: localAthleticsEvents,
       allAthleticsEvents: athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent),
       mainEvents,
       fittingEvents,
       fittingAthleticsEvents,
-      campusUpdates: feedUpdates.updates,
+      campusUpdates: mergedCampusUpdates,
+      truViewEvents,
+      truViewHighlights: truViewContext?.highlights ?? [],
       timeAwarenessNote: summarizeTimeAwareness(
-        [...eventsForDate.events, ...athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent)],
+        [...combinedCampusEvents, ...athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent)],
         [...relevantCampusEvents, ...localAthleticsEvents],
         resolvedDate,
         resolvedTimeZone,
@@ -685,15 +812,17 @@ export class ConciergeService {
       busyBlocks: schedule.busyBlocks,
       freeBlocks: schedule.freeBlocks,
       campusEvents: relevantCampusEvents,
-      allCampusEvents: eventsForDate.events,
+      allCampusEvents: combinedCampusEvents,
       athleticsEvents: localAthleticsEvents,
       allAthleticsEvents: athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent),
       mainEvents,
       fittingEvents,
       fittingAthleticsEvents,
-      campusUpdates: feedUpdates.updates,
+      campusUpdates: mergedCampusUpdates,
+      truViewEvents,
+      truViewHighlights: truViewContext?.highlights ?? [],
       timeAwarenessNote: summarizeTimeAwareness(
-        [...eventsForDate.events, ...athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent)],
+        [...combinedCampusEvents, ...athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent)],
         [...relevantCampusEvents, ...localAthleticsEvents],
         resolvedDate,
         resolvedTimeZone,
@@ -733,6 +862,7 @@ export class ConciergeService {
         /\b(glowga|pilates|yoga|dance|fitness|other|another|more|what about)\b/i.test(question));
     const isAthleticsQuery = ATHLETICS_QUERY_PATTERN.test(question);
     const isNewsletterQuery = NEWSLETTER_QUERY_PATTERN.test(question);
+    const isTruViewQuery = TRUVIEW_QUERY_PATTERN.test(question);
     const isWeekPlanQuery = WEEK_PLAN_QUERY_PATTERN.test(question);
     const intent = this.intentService.classifyIntent(question);
 
@@ -827,7 +957,8 @@ export class ConciergeService {
     }
 
     const needsCalendar = intent === "SPECIFIC" && Boolean(userId);
-    const [eventsForDate, athleticsEventsForDate, feedUpdates, schedule] = await Promise.all([
+    const [eventsForDate, athleticsEventsForDate, feedUpdates, truViewContext, schedule] =
+      await Promise.all([
       this.trumanEventsService.getEventsForDate({
         date: resolvedDate,
         timeZone: resolvedTimeZone,
@@ -843,6 +974,9 @@ export class ConciergeService {
         timeZone: resolvedTimeZone,
         forceRefresh: forceRefreshEvents,
       }),
+      this.truViewService?.getPublicContext({
+        forceRefresh: forceRefreshEvents,
+      }) ?? Promise.resolve(null),
       needsCalendar
         ? this.googleCalendarService.getDailySchedule({
             userId,
@@ -856,10 +990,28 @@ export class ConciergeService {
             date: resolvedDate,
             timeZone: resolvedTimeZone,
           }),
+      ]);
+
+    const truViewUpdates = (truViewContext?.notices?.notices ?? []).map((notice) => ({
+      title: notice.title,
+      summary: notice.summary,
+      url: notice.url,
+      feedTitle: "TruView",
+      displayTime: notice.displayTime,
+      category: "TruView",
+      sourceType: "truview-notice",
+    }));
+    const mergedCampusUpdates = [...truViewUpdates, ...(feedUpdates.updates ?? [])];
+    const truViewEvents = normalizeTruViewEvents(truViewContext?.events?.events ?? []);
+    const combinedCampusEvents = dedupeEvents([
+      ...(eventsForDate.events ?? []),
+      ...truViewEvents,
     ]);
 
     if (isAthleticsQuery && !isSchedulingRequest) {
-      const athleticsUpdates = feedUpdates.updates.filter((u) => u.category === "Athletics");
+      const athleticsUpdates = mergedCampusUpdates.filter(
+        (u) => u.category === "Athletics",
+      );
       const activeAthleticsEvents = prioritizeTodayEvents(
         athleticsEventsForDate.events,
         resolvedDate,
@@ -894,8 +1046,30 @@ export class ConciergeService {
       return;
     }
 
+    if (isTruViewQuery && !isSchedulingRequest) {
+      const textResponse = formatTruViewDirectAnswer({
+        question,
+        truViewContext,
+      });
+      yield { type: "delta", text: textResponse };
+      const updatedConversation = await this.conversationStoreService.appendTurn(
+        conversation.conversationId,
+        question,
+        textResponse,
+      );
+      yield {
+        type: "done",
+        conversationId: conversation.conversationId,
+        conversation: updatedConversation,
+        requestType: "TRUVIEW",
+        textResponse,
+        truView: truViewContext,
+      };
+      return;
+    }
+
     const activeCampusEvents = prioritizeTodayEvents(
-      eventsForDate.events,
+      combinedCampusEvents,
       resolvedDate,
       resolvedTimeZone,
     );
@@ -905,7 +1079,7 @@ export class ConciergeService {
       resolvedTimeZone,
     );
     const relevantCampusEvents = getRelevantEventsForAnswer(
-      eventsForDate.events,
+      combinedCampusEvents,
       activeCampusEvents,
       resolvedDate,
       resolvedTimeZone,
@@ -943,17 +1117,19 @@ export class ConciergeService {
       calendarConnected: schedule.calendarConnected,
       meetingDraft,
       freeBlocks: schedule.freeBlocks,
-      campusEvents: eventsForDate.events,
-      allCampusEvents: eventsForDate.events,
+      campusEvents: relevantCampusEvents,
+      allCampusEvents: combinedCampusEvents,
       athleticsEvents: localAthleticsEvents,
       allAthleticsEvents: athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent),
       mainEvents,
       fittingEvents,
       fittingAthleticsEvents,
-      campusUpdates: feedUpdates.updates,
+      campusUpdates: mergedCampusUpdates,
+      truViewEvents,
+      truViewHighlights: truViewContext?.highlights ?? [],
       timeAwarenessNote: summarizeTimeAwareness(
         [
-          ...eventsForDate.events,
+          ...combinedCampusEvents,
           ...athleticsEventsForDate.events.filter(isLikelyLocalAthleticsEvent),
         ],
         [...relevantCampusEvents, ...localAthleticsEvents],
