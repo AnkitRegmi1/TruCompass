@@ -4,6 +4,30 @@ import {
   zonedTimeToUtc,
 } from "../../lib/time/timeZone.js";
 
+const LLM_SUMMARY_TIMEOUT_MS = 12_000;
+
+async function withTimeout(promise, timeoutMs, fallbackValue = null) {
+  let timeoutId;
+
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(fallbackValue), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function safeServiceCall(factory, fallbackValue) {
+  try {
+    return await factory();
+  } catch {
+    return fallbackValue;
+  }
+}
+
 function addDays(dateKey, days, timeZone) {
   const range = getDayRange(dateKey, timeZone);
   const next = new Date(range.start.getTime() + days * 24 * 60 * 60 * 1000);
@@ -1107,27 +1131,51 @@ export class WeekPlannerService {
       weekDates.map(async (day) => {
         const [campusEvents, athleticsEvents, campusUpdates, recData, dining] =
           await Promise.all([
-            this.trumanEventsService.getEventsForDate({
-              date: day,
-              timeZone: resolvedTimeZone,
-              forceRefresh,
-            }),
-            this.trumanEventsService.getAthleticsEventsForDate({
-              date: day,
-              timeZone: resolvedTimeZone,
-              forceRefresh,
-            }),
-            this.trumanEventsService.getFeedUpdates({
-              date: day,
-              timeZone: resolvedTimeZone,
-              forceRefresh,
-              limit: 8,
-            }),
-            this.campusRecService.getCampusRecData({ date: day }),
-            this.diningService.getAllMenus({
-              date: day,
-              forceRefresh,
-            }),
+            safeServiceCall(
+              () =>
+                this.trumanEventsService.getEventsForDate({
+                  date: day,
+                  timeZone: resolvedTimeZone,
+                  forceRefresh,
+                }),
+              { events: [], mainEvents: [], source: "fallback" },
+            ),
+            safeServiceCall(
+              () =>
+                this.trumanEventsService.getAthleticsEventsForDate({
+                  date: day,
+                  timeZone: resolvedTimeZone,
+                  forceRefresh,
+                }),
+              { events: [], source: "fallback" },
+            ),
+            safeServiceCall(
+              () =>
+                this.trumanEventsService.getFeedUpdates({
+                  date: day,
+                  timeZone: resolvedTimeZone,
+                  forceRefresh,
+                  limit: 8,
+                }),
+              { updates: [], source: "fallback" },
+            ),
+            safeServiceCall(
+              () => this.campusRecService.getCampusRecData({ date: day }),
+              {
+                hoursText: "Hours unavailable",
+                currentPeople: null,
+                classes: [],
+                events: [],
+              },
+            ),
+            safeServiceCall(
+              () =>
+                this.diningService.getAllMenus({
+                  date: day,
+                  forceRefresh,
+                }),
+              {},
+            ),
           ]);
 
         const schedule =
@@ -1348,35 +1396,39 @@ export class WeekPlannerService {
     });
 
     if (this.llmClient?.isConfigured()) {
-      const result = await this.llmClient.createTextResponse({
-        model: this.model,
-        maxOutputTokens: 500,
-        systemPrompt:
-          "You are a Truman State weekly planning assistant. Write a short, conversational weekly plan summary. Mention the student's week range, how the Google Calendar shaped the plan when connected, a few meal ideas, a few events that fit, Rec options, study-library suggestions, key campus/news updates, and one surprise suggestion if present. Do not end with follow-up questions. Do not invent data.",
-        userPrompt: JSON.stringify(
-          {
-            weekDates,
-            calendarConnected,
-            preferences: mergedPreferences,
-            mealSuggestions: mealSuggestionsWithoutConflicts,
-            eventSuggestions,
-            recSuggestions,
-            recCrowdSuggestions,
-            studySuggestions,
-            updateHighlights: updateHighlights.slice(0, 5),
-            librarySnapshot,
-            academicHighlights,
-            inferredCourses: inferredCourses.slice(0, 5),
-            surprisePick,
-            diningNote,
-            studyHoursPerWeek: mergedPreferences.studyHoursPerWeek,
-          },
-          null,
-          2,
-        ),
-      });
+      const result = await withTimeout(
+        this.llmClient.createTextResponse({
+          model: this.model,
+          maxOutputTokens: 500,
+          systemPrompt:
+            "You are a Truman State weekly planning assistant. Write a short, conversational weekly plan summary. Mention the student's week range, how the Google Calendar shaped the plan when connected, a few meal ideas, a few events that fit, Rec options, study-library suggestions, key campus/news updates, and one surprise suggestion if present. Do not end with follow-up questions. Do not invent data.",
+          userPrompt: JSON.stringify(
+            {
+              weekDates,
+              calendarConnected,
+              preferences: mergedPreferences,
+              mealSuggestions: mealSuggestionsWithoutConflicts,
+              eventSuggestions,
+              recSuggestions,
+              recCrowdSuggestions,
+              studySuggestions,
+              updateHighlights: updateHighlights.slice(0, 5),
+              librarySnapshot,
+              academicHighlights,
+              inferredCourses: inferredCourses.slice(0, 5),
+              surprisePick,
+              diningNote,
+              studyHoursPerWeek: mergedPreferences.studyHoursPerWeek,
+            },
+            null,
+            2,
+          ),
+        }),
+        LLM_SUMMARY_TIMEOUT_MS,
+        null,
+      ).catch(() => null);
 
-      if (result.text) {
+      if (result?.text) {
         textResponse = result.text;
       }
     }

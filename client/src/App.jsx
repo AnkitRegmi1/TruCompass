@@ -612,7 +612,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (studentName.trim() && calendarConnected && !onboardingComplete) {
+    if ((studentName.trim() || calendarConnected) && !onboardingComplete) {
       setOnboardingComplete(true);
     }
   }, [studentName, calendarConnected, onboardingComplete]);
@@ -668,15 +668,22 @@ function App() {
   }
 
   function completeOnboarding() {
-    if (!studentName.trim() || !calendarConnected) {
+    if (!studentName.trim()) {
+      setStudentName("Student");
       setVoiceStatus(
-        !studentName.trim()
-          ? "Add your name first, then enter the app."
-          : "Connect Google Calendar first, then enter the app.",
+        calendarConnected
+          ? "You are in. Google Calendar is connected and ready to personalize your week."
+          : "You are in. Connect Google Calendar any time for schedule-aware answers and planning.",
       );
+      setOnboardingComplete(true);
       return;
     }
 
+    if (!calendarConnected) {
+      setVoiceStatus(
+        "You are in. Connect Google Calendar any time for schedule-aware answers and planning.",
+      );
+    }
     setOnboardingComplete(true);
   }
 
@@ -764,6 +771,7 @@ function App() {
 
     const recognition = new speechRecognition();
     const voiceSessionId = voiceSessionRef.current + 1;
+    let hasSubmittedTranscript = false;
     voiceSessionRef.current = voiceSessionId;
     recognitionRef.current = recognition;
     isListeningRef.current = true;
@@ -798,6 +806,7 @@ function App() {
 
       if (hasFinalChunk) {
         setVoiceStatus("On it...");
+        hasSubmittedTranscript = true;
         try { recognition.stop(); } catch {}
         void askConcierge(undefined, trimmed);
       }
@@ -824,10 +833,21 @@ function App() {
         return;
       }
 
+      const transcript = lastTranscriptRef.current?.trim();
       recognitionRef.current = null;
       isListeningRef.current = false;
       setIsListening(false);
       setListeningTab(null);
+
+      if (
+        voiceConversationModeRef.current &&
+        transcript &&
+        !hasSubmittedTranscript
+      ) {
+        hasSubmittedTranscript = true;
+        setVoiceStatus("On it...");
+        void askConcierge(undefined, transcript);
+      }
     };
 
     try {
@@ -1292,10 +1312,14 @@ function App() {
     setIsBuildingPlan(true);
     setPlannerSummary("Building your personalized Truman week...");
 
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 35_000);
+
     try {
       const response = await fetch("/api/planner/week", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           userId,
           date,
@@ -1322,8 +1346,13 @@ function App() {
       setShowPlannerJourney(false);
       setPlannerRevealIndex(0);
     } catch (error) {
-      setPlannerSummary(error.message);
+      setPlannerSummary(
+        error?.name === "AbortError"
+          ? "Building took too long on the hosted app. Try again in a moment."
+          : error.message,
+      );
     } finally {
+      window.clearTimeout(timeoutId);
       setIsBuildingPlan(false);
     }
   }
