@@ -736,18 +736,36 @@ function App() {
   }
 
   function speakReply(text, onDone) {
-    if (!autoSpeak || !window.speechSynthesis || !text) {
+    if (!autoSpeak || !text) {
+      onDone?.();
+      return;
+    }
+
+    if (!window.speechSynthesis || typeof SpeechSynthesisUtterance === "undefined") {
+      setVoiceStatus("Answer is ready, but browser speech is not available here.");
       onDone?.();
       return;
     }
 
     window.speechSynthesis.cancel();
+    window.speechSynthesis.resume?.();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = 1;
     utterance.pitch = 1;
     utterance.lang = "en-US";
-    utterance.onend = () => onDone?.();
+    utterance.onstart = () => {
+      setVoiceStatus("Speaking...");
+    };
+    utterance.onend = () => {
+      setVoiceStatus("Ready when you are.");
+      onDone?.();
+    };
+    utterance.onerror = () => {
+      setVoiceStatus("Answer is ready, but speech playback was blocked.");
+      onDone?.();
+    };
     window.speechSynthesis.speak(utterance);
+    window.setTimeout(() => window.speechSynthesis.resume?.(), 50);
   }
 
   function startVoiceInput(targetTab = activeTab) {
