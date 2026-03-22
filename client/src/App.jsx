@@ -612,6 +612,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (studentName.trim() && calendarConnected && !onboardingComplete) {
+      setOnboardingComplete(true);
+    }
+  }, [studentName, calendarConnected, onboardingComplete]);
+
+  useEffect(() => {
     setPlannerStepInput(getStepValue(plannerStep, plannerPreferences));
   }, [plannerPreferences, plannerStep]);
 

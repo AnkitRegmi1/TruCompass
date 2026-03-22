@@ -50,6 +50,7 @@ export function createApp() {
   const env = getEnv();
   const app = express();
   const publicDir = resolve("public");
+  const assetsDir = resolve(publicDir, "assets");
   const supabaseClient = new SupabaseClient({
     url: env.supabaseUrl,
     serviceRoleKey: env.supabaseServiceRoleKey,
@@ -225,7 +226,28 @@ export function createApp() {
   });
 
   app.use(express.json());
-  app.use(express.static(publicDir));
+  app.use(
+    "/assets",
+    express.static(assetsDir, {
+      immutable: true,
+      maxAge: "1y",
+    }),
+  );
+  app.use(
+    express.static(publicDir, {
+      index: false,
+      setHeaders(response, filePath) {
+        if (filePath.endsWith(".html")) {
+          response.setHeader(
+            "Cache-Control",
+            "no-store, no-cache, must-revalidate, proxy-revalidate",
+          );
+          response.setHeader("Pragma", "no-cache");
+          response.setHeader("Expires", "0");
+        }
+      },
+    }),
+  );
   app.use("/audio", express.static(resolve("data/audio")));
 
   app.get("/health", (_request, response) => {
@@ -318,6 +340,12 @@ export function createApp() {
       return;
     }
 
+    response.setHeader(
+      "Cache-Control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate",
+    );
+    response.setHeader("Pragma", "no-cache");
+    response.setHeader("Expires", "0");
     response.sendFile(resolve(publicDir, "index.html"));
   });
 
