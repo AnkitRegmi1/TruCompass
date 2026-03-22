@@ -1,0 +1,20 @@
+node_modules/
+client/node_modules/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# app data and generated runtime files
+data/
+
+# built frontend output
+/public/
+
+# common junk
+*.log
+.DS_Store
+Thumbs.db
+
+/Extract Design Principles/

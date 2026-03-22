@@ -1,0 +1,28 @@
+{
+  "name": "truman-state-campus-concierge",
+  "version": "1.0.0",
+  "description": "Voice-enabled campus concierge backend for Truman State University students.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --env-file=.env --watch src/server.js",
+    "dev:client": "vite",
+    "dev:all": "concurrently \"npm:dev\" \"npm:dev:client\"",
+    "build:client": "vite build",
+    "start": "node --env-file=.env src/server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.99.3",
+    "@upstash/redis": "^1.37.0",
+    "@vitejs/plugin-react": "^6.0.1",
+    "cheerio": "^1.1.2",
+    "express": "^4.21.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "vite": "^8.0.1",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
