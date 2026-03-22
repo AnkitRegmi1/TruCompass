@@ -2,9 +2,18 @@ import express from "express";
 import { resolve } from "node:path";
 import { getEnv } from "./config/env.js";
 import { FileCache } from "./lib/cache/fileCache.js";
+import { RedisDocumentCache } from "./lib/cache/redisDocumentCache.js";
+import {
+  SupabaseConversationStore,
+  SupabaseGoogleTokenStore,
+  SupabaseOAuthStateStore,
+  SupabasePlannerPreferencesStore,
+} from "./lib/store/supabaseStores.js";
 import { GoogleCalendarClient } from "./integrations/google/calendarClient.js";
 import { GoogleOAuthClient } from "./integrations/google/oauthClient.js";
 import { OpenAiClient } from "./integrations/openai/client.js";
+import { RedisClient } from "./integrations/redis/client.js";
+import { SupabaseClient } from "./integrations/supabase/client.js";
 import { TrumanApiClient } from "./integrations/truman/client.js";
 import { createCalendarRouter } from "./routes/calendar.js";
 import { createConciergeRouter } from "./routes/concierge.js";
@@ -41,6 +50,27 @@ export function createApp() {
   const env = getEnv();
   const app = express();
   const publicDir = resolve("public");
+  const supabaseClient = new SupabaseClient({
+    url: env.supabaseUrl,
+    serviceRoleKey: env.supabaseServiceRoleKey,
+  });
+  const redisClient = new RedisClient({
+    url: env.upstashRedisRestUrl,
+    token: env.upstashRedisRestToken,
+    keyPrefix: env.redisKeyPrefix,
+  });
+  const createCacheStore = (
+    redisKey,
+    filePath,
+    ttlSeconds = env.redisCacheTtlSeconds,
+  ) =>
+    redisClient.isConfigured()
+      ? new RedisDocumentCache({
+          client: redisClient,
+          key: redisKey,
+          ttlSeconds,
+        })
+      : new FileCache(resolve(filePath));
 
   // Build integrations and services here so routes stay thin and easy to extend later.
   const trumanApiClient = new TrumanApiClient({
@@ -50,17 +80,21 @@ export function createApp() {
     feedsPath: env.trumanFeedsPath,
   });
 
-  const trumanEventsCache = new FileCache(
-    resolve("data/cache/truman-events.json"),
+  const trumanEventsCache = createCacheStore(
+    "cache:truman-events",
+    "data/cache/truman-events.json",
   );
-  const trumanAthleticsCache = new FileCache(
-    resolve("data/cache/truman-athletics-events.json"),
+  const trumanAthleticsCache = createCacheStore(
+    "cache:truman-athletics-events",
+    "data/cache/truman-athletics-events.json",
   );
-  const trumanFeedsCache = new FileCache(
-    resolve("data/cache/truman-feeds.json"),
+  const trumanFeedsCache = createCacheStore(
+    "cache:truman-feeds",
+    "data/cache/truman-feeds.json",
   );
-  const trumanFeedUpdatesCache = new FileCache(
-    resolve("data/cache/truman-feed-updates.json"),
+  const trumanFeedUpdatesCache = createCacheStore(
+    "cache:truman-feed-updates",
+    "data/cache/truman-feed-updates.json",
   );
 
   const trumanEventsService = new TrumanEventsService({
@@ -73,14 +107,27 @@ export function createApp() {
     defaultTimeZone: env.defaultTimeZone,
   });
 
+  const googleOAuthStateCache = new FileCache(
+    resolve("data/google/oauth-states.json"),
+  );
+  const googleCalendarTokenCache = new FileCache(
+    resolve("data/google/calendar-tokens.json"),
+  );
+
   const googleCalendarAuthService = new GoogleCalendarAuthService({
     oauthClient: new GoogleOAuthClient({
       clientId: env.googleClientId,
       clientSecret: env.googleClientSecret,
       redirectUri: env.googleRedirectUri,
     }),
-    stateCache: new FileCache(resolve("data/google/oauth-states.json")),
-    tokenCache: new FileCache(resolve("data/google/calendar-tokens.json")),
+    stateCache: googleOAuthStateCache,
+    tokenCache: googleCalendarTokenCache,
+    stateStore: supabaseClient.isConfigured()
+      ? new SupabaseOAuthStateStore({ client: supabaseClient })
+      : null,
+    tokenStore: supabaseClient.isConfigured()
+      ? new SupabaseGoogleTokenStore({ client: supabaseClient })
+      : null,
   });
 
   const googleCalendarService = new GoogleCalendarService({
@@ -96,17 +143,21 @@ export function createApp() {
   });
 
   const campusRecService = new CampusRecService({
-    historyCache: new FileCache(resolve("data/cache/rec-history.json")),
+    historyCache: createCacheStore(
+      "cache:rec-history",
+      "data/cache/rec-history.json",
+      null,
+    ),
   });
   const diningService = new DiningService({
-    cache: new FileCache(resolve("data/cache/dining-menus.json")),
+    cache: createCacheStore("cache:dining-menus", "data/cache/dining-menus.json"),
     apiKey: env.sodexoApiKey,
   });
   const newsletterService = new NewsletterService({
-    cache: new FileCache(resolve("data/cache/newsletter.json")),
+    cache: createCacheStore("cache:newsletter", "data/cache/newsletter.json"),
   });
   const truViewService = new TruViewService({
-    cache: new FileCache(resolve("data/cache/truview.json")),
+    cache: createCacheStore("cache:truview", "data/cache/truview.json"),
   });
   const studentSupportService = new StudentSupportService({
     googleCalendarService,
@@ -114,6 +165,9 @@ export function createApp() {
   });
   const preferencesService = new UserPreferencesService({
     cache: new FileCache(resolve("data/cache/planner-preferences.json")),
+    store: supabaseClient.isConfigured()
+      ? new SupabasePlannerPreferencesStore({ client: supabaseClient })
+      : null,
   });
   const libraryService = new LibraryService();
   const academicCalendarService = new AcademicCalendarService();
@@ -153,6 +207,9 @@ export function createApp() {
     }),
     conversationStoreService: new ConversationStoreService({
       cache: new FileCache(resolve("data/cache/conversations.json")),
+      store: supabaseClient.isConfigured()
+        ? new SupabaseConversationStore({ client: supabaseClient })
+        : null,
     }),
     responseService: new ResponseService({
       llmClient: openAiClient,
@@ -177,6 +234,8 @@ export function createApp() {
         googleCalendarConfigured: googleCalendarAuthService.isConfigured(),
         openAiConfigured: openAiClient.isConfigured(),
         truViewConfigured: true,
+        supabaseConfigured: supabaseClient.isConfigured(),
+        redisConfigured: redisClient.isConfigured(),
       },
     });
   });

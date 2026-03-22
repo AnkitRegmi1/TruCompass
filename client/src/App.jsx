@@ -64,6 +64,14 @@ const PLANNER_STEPS = [
     inputMode: "choice-only",
   },
   {
+    key: "recSessionsPerWeek",
+    label: "Rec Frequency",
+    question: "How many Rec sessions should I fit into this week?",
+    help: "This tells me how many workout or Rec class slots to protect.",
+    quickChoices: ["1", "2", "3", "4", "5"],
+    inputMode: "choice-only",
+  },
+  {
     key: "preferredRecTime",
     label: "Rec Time",
     question: "When should I look for Rec time?",
@@ -99,8 +107,8 @@ const PLANNER_STEPS = [
     key: "hardestCourses",
     label: "Courses",
     question: "Which courses need the most attention this week?",
-    help: "I'll name study blocks around these classes so the plan feels more personal.",
-    quickChoices: ["CS 180", "MATH 198", "BIO 120", "ENG 190"],
+    help: "I'll pull likely classes from your calendar when I can, and you can still type your own below.",
+    quickChoices: [],
     inputMode: "text",
     placeholder: "CS 180, MATH 198",
   },
@@ -188,6 +196,7 @@ function getInitialPreferences() {
     favoriteFoods: [],
     favoriteEventTypes: [],
     preferredRecActivities: [],
+    recSessionsPerWeek: 0,
     preferredRecTime: "",
     preferredRecCrowd: "",
     wantsRecClasses: null,
@@ -207,8 +216,17 @@ function normalizePreferences(preferences = {}) {
     favoriteFoods: preferences.favoriteFoods ?? [],
     favoriteEventTypes: preferences.favoriteEventTypes ?? [],
     preferredRecActivities: preferences.preferredRecActivities ?? [],
+    recSessionsPerWeek: Number(preferences.recSessionsPerWeek ?? 0) || 0,
     hardestCourses: preferences.hardestCourses ?? [],
   };
+}
+
+function getCourseQuickChoices(courseOptions = [], selectedCourses = []) {
+  const detectedCourses = (courseOptions ?? [])
+    .map((item) => (typeof item === "string" ? item : item?.course))
+    .filter(Boolean);
+
+  return [...new Set([...(detectedCourses ?? []), ...(selectedCourses ?? [])])].slice(0, 6);
 }
 
 function getStepValue(step, preferences) {
@@ -246,6 +264,9 @@ function applyStepValue(step, rawValue, previousPreferences) {
     case "wantsRecClasses":
       next.wantsRecClasses =
         /^yes$/i.test(value) ? true : /^no$/i.test(value) ? false : null;
+      break;
+    case "recSessionsPerWeek":
+      next.recSessionsPerWeek = Number(value) || 0;
       break;
     case "preferredRecTime":
       next.preferredRecTime = value.toLowerCase();
@@ -403,6 +424,7 @@ function App() {
     "Walk through the planner questions, then I'll build a weekly plan around your Google Calendar.",
   );
   const [plannerPlan, setPlannerPlan] = useState(null);
+  const [plannerCourseOptions, setPlannerCourseOptions] = useState([]);
   const [plannerRevealIndex, setPlannerRevealIndex] = useState(-1);
   const [isBuildingPlan, setIsBuildingPlan] = useState(false);
   const [isSavingWholePlan, setIsSavingWholePlan] = useState(false);
@@ -428,6 +450,15 @@ function App() {
   const talkDateLabel = date === todayDate ? `Today · ${formatDateLabel(date)}` : formatDateLabel(date);
   const weekRangeLabel = formatWeekRangeLabel(date);
   const plannerStep = PLANNER_STEPS[plannerStepIndex];
+  const plannerStepChoices =
+    plannerStep.key === "hardestCourses"
+      ? getCourseQuickChoices(
+          plannerPlan?.inferredCourses?.length
+            ? plannerPlan.inferredCourses
+            : plannerCourseOptions,
+          plannerPreferences.hardestCourses,
+        )
+      : plannerStep.quickChoices;
   const plannerSections = [
     {
       title: "Meals",
@@ -530,16 +561,6 @@ function App() {
       }),
     },
     {
-      title: "Next Questions",
-      items: plannerPlan?.nextQuestions ?? [],
-      render: (item) => ({
-        title: item,
-        subtitle: "",
-        body: [],
-        payload: null,
-      }),
-    },
-    {
       title: "Detected Courses",
       items: plannerPlan?.inferredCourses ?? [],
       render: (item) => ({
@@ -611,6 +632,30 @@ function App() {
 
     loadPreferences();
   }, [userId]);
+
+  useEffect(() => {
+    async function loadPlannerContext() {
+      try {
+        const response = await fetch(
+          `/api/planner/context?userId=${encodeURIComponent(userId)}&date=${encodeURIComponent(date)}&timeZone=${encodeURIComponent("America/Chicago")}`,
+        );
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Unable to load planner context.");
+        }
+
+        setPlannerCourseOptions(data.inferredCourses ?? []);
+        if (typeof data.calendarConnected === "boolean") {
+          setCalendarConnected((current) => current || data.calendarConnected);
+        }
+      } catch {
+        setPlannerCourseOptions([]);
+      }
+    }
+
+    loadPlannerContext();
+  }, [userId, date]);
 
   function updatePlannerPreferences(value = plannerStepInput) {
     setPlannerPreferences((current) => applyStepValue(plannerStep, value, current));
@@ -1224,7 +1269,8 @@ function App() {
     }
   }
 
-  async function buildWeekPlan() {
+  async function buildWeekPlan(options = {}) {
+    const { forceRefresh = false } = options;
     const syncedPreferences = applyStepValue(
       plannerStep,
       plannerStepInput,
@@ -1245,6 +1291,7 @@ function App() {
           timeZone: "America/Chicago",
           question: "Plan my week",
           preferences: syncedPreferences,
+          forceRefresh,
         }),
       });
 
@@ -1255,6 +1302,7 @@ function App() {
 
       setPlannerPlan(data);
       setPlannerPreferences(normalizePreferences(data.preferences ?? syncedPreferences));
+      setPlannerCourseOptions(data.inferredCourses ?? []);
       setCalendarConnected(Boolean(data.calendarConnected) || calendarConnected);
       setPlannerSummary(
         data.textResponse ||
@@ -1718,7 +1766,7 @@ function App() {
                     <p className="subtle-copy">{plannerStep.help}</p>
 
                     <div className="choice-grid">
-                      {plannerStep.quickChoices.map((choice) => {
+                      {plannerStepChoices.map((choice) => {
                         const stepValue = getStepValue(plannerStep, plannerPreferences);
                         const selectedValues = splitCsv(stepValue).map((item) =>
                           item.toLowerCase(),
@@ -1839,6 +1887,16 @@ function App() {
                       <button className="secondary-button" onClick={savePlannerPreferences} type="button">
                         Save Progress
                       </button>
+                      {plannerPlan ? (
+                        <button
+                          className="secondary-button"
+                          disabled={isBuildingPlan}
+                          onClick={() => buildWeekPlan({ forceRefresh: true })}
+                          type="button"
+                        >
+                          {isBuildingPlan ? "Refreshing..." : "Refresh Plan"}
+                        </button>
+                      ) : null}
                       <button
                         className="primary-button"
                         disabled={isSavingWholePlan}

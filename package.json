@@ -9,7 +9,7 @@
     "dev:client": "vite",
     "dev:all": "concurrently \"npm:dev\" \"npm:dev:client\"",
     "build:client": "vite build",
-    "start": "node --env-file=.env src/server.js"
+    "start": "node src/server.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.3",

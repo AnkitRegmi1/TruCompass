@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: trucompass
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build:client
+    startCommand: npm run start
+    autoDeploy: true

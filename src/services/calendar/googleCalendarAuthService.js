@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 export class GoogleCalendarAuthService {
-  constructor({ oauthClient, stateCache, tokenCache }) {
+  constructor({ oauthClient, stateCache, tokenCache, stateStore, tokenStore }) {
     this.oauthClient = oauthClient;
     this.stateCache = stateCache;
     this.tokenCache = tokenCache;
+    this.stateStore = stateStore;
+    this.tokenStore = tokenStore;
   }
 
   isConfigured() {
@@ -17,29 +19,43 @@ export class GoogleCalendarAuthService {
     }
 
     const state = randomUUID();
-    const states = (await this.stateCache.read()) ?? {};
-    states[state] = {
+    const stateRecord = {
       userId,
       createdAt: Date.now(),
     };
-    await this.stateCache.write(states);
+
+    if (this.stateStore?.saveState) {
+      await this.stateStore.saveState(state, stateRecord);
+    } else {
+      const states = (await this.stateCache.read()) ?? {};
+      states[state] = stateRecord;
+      await this.stateCache.write(states);
+    }
 
     return this.oauthClient.createAuthUrl(state);
   }
 
   async handleOAuthCallback({ code, state }) {
-    const states = (await this.stateCache.read()) ?? {};
-    const stateRecord = states[state];
+    let stateRecord = null;
+
+    if (this.stateStore?.getState) {
+      stateRecord = await this.stateStore.getState(state);
+    } else {
+      const states = (await this.stateCache.read()) ?? {};
+      stateRecord = states[state];
+    }
 
     if (!stateRecord) {
       throw new Error("Google OAuth state is invalid or has expired.");
     }
 
     const tokenResponse = await this.oauthClient.exchangeCodeForTokens(code);
-    const existingTokensByUser = (await this.tokenCache.read()) ?? {};
-    const existingTokens = existingTokensByUser[stateRecord.userId] ?? {};
+    const existingTokens =
+      (await this.tokenStore?.getTokens?.(stateRecord.userId)) ??
+      ((await this.tokenCache.read()) ?? {})[stateRecord.userId] ??
+      {};
 
-    existingTokensByUser[stateRecord.userId] = {
+    const nextTokens = {
       accessToken: tokenResponse.access_token,
       refreshToken: tokenResponse.refresh_token ?? existingTokens.refreshToken ?? "",
       expiryAt: Date.now() + Number(tokenResponse.expires_in ?? 0) * 1000,
@@ -47,12 +63,21 @@ export class GoogleCalendarAuthService {
       tokenType: tokenResponse.token_type,
     };
 
-    delete states[state];
+    if (this.stateStore?.deleteState) {
+      await this.stateStore.deleteState(state);
+    } else {
+      const states = (await this.stateCache.read()) ?? {};
+      delete states[state];
+      await this.stateCache.write(states);
+    }
 
-    await Promise.all([
-      this.stateCache.write(states),
-      this.tokenCache.write(existingTokensByUser),
-    ]);
+    if (this.tokenStore?.saveTokens) {
+      await this.tokenStore.saveTokens(stateRecord.userId, nextTokens);
+    } else {
+      const existingTokensByUser = (await this.tokenCache.read()) ?? {};
+      existingTokensByUser[stateRecord.userId] = nextTokens;
+      await this.tokenCache.write(existingTokensByUser);
+    }
 
     return {
       userId: stateRecord.userId,
@@ -65,8 +90,11 @@ export class GoogleCalendarAuthService {
       return null;
     }
 
-    const tokensByUser = (await this.tokenCache.read()) ?? {};
-    const userTokens = tokensByUser[userId];
+    const tokensByUser = this.tokenStore?.saveTokens ? null : (await this.tokenCache.read()) ?? {};
+    const userTokens =
+      (await this.tokenStore?.getTokens?.(userId)) ??
+      tokensByUser?.[userId] ??
+      null;
 
     if (!userTokens) {
       return null;
@@ -84,7 +112,7 @@ export class GoogleCalendarAuthService {
       userTokens.refreshToken,
     );
 
-    tokensByUser[userId] = {
+    const refreshed = {
       ...userTokens,
       accessToken: refreshedTokens.access_token,
       refreshToken: refreshedTokens.refresh_token ?? userTokens.refreshToken,
@@ -93,8 +121,13 @@ export class GoogleCalendarAuthService {
       tokenType: refreshedTokens.token_type ?? userTokens.tokenType,
     };
 
-    await this.tokenCache.write(tokensByUser);
+    if (this.tokenStore?.saveTokens) {
+      await this.tokenStore.saveTokens(userId, refreshed);
+    } else {
+      tokensByUser[userId] = refreshed;
+      await this.tokenCache.write(tokensByUser);
+    }
 
-    return tokensByUser[userId].accessToken;
+    return refreshed.accessToken;
   }
 }

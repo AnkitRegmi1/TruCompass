@@ -77,5 +77,26 @@ export function createPlannerRouter({
     }
   });
 
+  router.get("/context", async (request, response, next) => {
+    try {
+      const { userId, date, timeZone = defaultTimeZone } = request.query ?? {};
+
+      if (!date) {
+        response.status(400).json({ error: "date is required." });
+        return;
+      }
+
+      const context = await weekPlannerService.getPlanningContext({
+        userId,
+        date,
+        timeZone,
+      });
+
+      response.json(context);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   return router;
 }

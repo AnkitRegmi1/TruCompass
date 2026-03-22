@@ -446,6 +446,10 @@ function getSelfDirectedRecActivities(preferences) {
   return ["workout"];
 }
 
+function getDesiredRecSessions(preferences) {
+  return Math.max(0, Number(preferences?.recSessionsPerWeek ?? 0) || 0);
+}
+
 function buildRecActivityTitle(activity) {
   const normalized = String(activity ?? "").toLowerCase();
 
@@ -498,6 +502,10 @@ function buildNextQuestions(preferences, calendarConnected) {
 
   if (!preferences.preferredRecTime) {
     questions.push("If you want Rec time this week, what time of day should I look for it: morning, afternoon, evening, or after class?");
+  }
+
+  if (!getDesiredRecSessions(preferences)) {
+    questions.push("How many Rec sessions should I fit into your week?");
   }
 
   if (!preferences.preferredRecCrowd) {
@@ -638,6 +646,22 @@ function scoreEventForPreferences(event, preferences) {
   return score;
 }
 
+function getCampusEventCandidatesForDay(day) {
+  const campusPool =
+    day.fittingEvents?.length > 0
+      ? day.fittingEvents
+      : day.mainEvents?.length > 0
+        ? day.mainEvents
+        : day.campusEvents ?? [];
+
+  const athleticsPool =
+    day.fittingAthleticsEvents?.length > 0
+      ? day.fittingAthleticsEvents
+      : (day.athleticsEvents ?? []).filter(isLikelyLocalEvent).slice(0, 2);
+
+  return [...campusPool, ...athleticsPool];
+}
+
 function scoreRecBlock(block, preferredRecTime, timeZone) {
   const preferred = String(preferredRecTime ?? "").toLowerCase();
   const hour = getHourInTimeZone(block.startsAt, timeZone);
@@ -739,6 +763,8 @@ async function buildRecCrowdSuggestions({
   timeZone,
 }) {
   const suggestions = [];
+  const desiredSessions = getDesiredRecSessions(preferences);
+  const limit = desiredSessions > 0 ? Math.min(desiredSessions, 4) : 4;
 
   for (const date of weekDates) {
     const schedule = weekSchedule.find((entry) => entry.date === date);
@@ -754,7 +780,7 @@ async function buildRecCrowdSuggestions({
 
     suggestions.push(...daySuggestions);
 
-    if (suggestions.length >= 4) {
+    if (suggestions.length >= limit) {
       break;
     }
   }
@@ -769,12 +795,15 @@ function buildSelfDirectedRecSuggestions({
   timeZone,
 }) {
   const activityPool = getSelfDirectedRecActivities(preferences);
+  const desiredSessions = getDesiredRecSessions(preferences);
   const windows =
     recCrowdSuggestions.length > 0
       ? recCrowdSuggestions
       : buildFallbackRecWindows(weekSchedule, preferences, timeZone);
 
-  return windows.slice(0, 4).map((window, index) => {
+  const limit = desiredSessions > 0 ? desiredSessions : 4;
+
+  return windows.slice(0, limit).map((window, index) => {
     const activity = activityPool[index % activityPool.length];
 
     return {
@@ -796,6 +825,9 @@ function buildRecClassSuggestions({
   preferences,
   timeZone,
 }) {
+  const desiredSessions = getDesiredRecSessions(preferences);
+  const limit = desiredSessions > 0 ? Math.max(desiredSessions * 2, 4) : 10;
+
   return dailyCampus
     .flatMap((day) => {
       const schedule = weekSchedule.find((entry) => entry.date === day.date);
@@ -826,7 +858,48 @@ function buildRecClassSuggestions({
           kind: "class",
         }));
     })
-    .slice(0, 10);
+    .slice(0, limit);
+}
+
+function sortTimedItems(items) {
+  return [...(items ?? [])].sort(
+    (left, right) =>
+      new Date(left.startsAt ?? 0).getTime() - new Date(right.startsAt ?? 0).getTime(),
+  );
+}
+
+function combineRecSuggestions({
+  selfDirectedRecSuggestions,
+  recClassSuggestions,
+  preferences,
+}) {
+  const desiredSessions = getDesiredRecSessions(preferences);
+  const limit = desiredSessions > 0 ? desiredSessions : 4;
+
+  if (preferences.wantsRecClasses !== true) {
+    return sortTimedItems(selfDirectedRecSuggestions).slice(0, limit);
+  }
+
+  const combined = [];
+  const classPool = sortTimedItems(recClassSuggestions);
+  const workoutPool = sortTimedItems(selfDirectedRecSuggestions);
+
+  if (limit > 1 && classPool.length && workoutPool.length) {
+    combined.push(classPool.shift());
+    combined.push(workoutPool.shift());
+  }
+
+  const remaining = sortTimedItems([...classPool, ...workoutPool]);
+
+  for (const item of remaining) {
+    if (combined.length >= limit) {
+      break;
+    }
+
+    combined.push(item);
+  }
+
+  return sortTimedItems(combined).slice(0, limit);
 }
 
 function buildFallbackPlanText({
@@ -918,10 +991,6 @@ function buildFallbackPlanText({
     );
   }
 
-  if (nextQuestions.length) {
-    parts.push(`To personalize it more, tell me: ${nextQuestions.join(" ")}`);
-  }
-
   return parts.join(" ");
 }
 
@@ -969,6 +1038,37 @@ export class WeekPlannerService {
     this.llmClient = llmClient;
     this.model = model;
     this.defaultTimeZone = defaultTimeZone;
+  }
+
+  async getPlanningContext({ userId, date, timeZone }) {
+    const resolvedTimeZone = timeZone ?? this.defaultTimeZone;
+    const weekDates = getWeekDates(date, resolvedTimeZone);
+    const weekSchedule = await Promise.all(
+      weekDates.map(async (day) =>
+        userId
+          ? this.googleCalendarService.getDailySchedule({
+              userId,
+              date: day,
+              timeZone: resolvedTimeZone,
+            })
+          : {
+              calendarConnected: false,
+              busyBlocks: [],
+              freeBlocks: [],
+              date: day,
+              timeZone: resolvedTimeZone,
+            },
+      ),
+    );
+
+    return {
+      userId,
+      date,
+      timeZone: resolvedTimeZone,
+      weekDates,
+      calendarConnected: weekSchedule.some((day) => day.calendarConnected),
+      inferredCourses: inferCoursesFromWeekSchedule(weekSchedule),
+    };
   }
 
   async planWeek({
@@ -1116,7 +1216,7 @@ export class WeekPlannerService {
 
     const rawEventSuggestions = dailyCampus
       .flatMap((day) =>
-        [...(day.fittingEvents ?? []), ...(day.fittingAthleticsEvents ?? [])]
+        getCampusEventCandidatesForDay(day)
           .map((event) => ({
             ...event,
             date: day.date,
@@ -1204,10 +1304,11 @@ export class WeekPlannerService {
       ),
       reservationsByDate,
     );
-    const recSuggestions = [
-      ...recClassSuggestions,
-      ...selfDirectedRecSuggestions,
-    ].slice(0, 10);
+    const recSuggestions = combineRecSuggestions({
+      selfDirectedRecSuggestions,
+      recClassSuggestions,
+      preferences: mergedPreferences,
+    });
     const surprisePick =
       surpriseCandidate && canPlaceItem(surpriseCandidate, reservationsByDate)
         ? surpriseCandidate
@@ -1251,7 +1352,7 @@ export class WeekPlannerService {
         model: this.model,
         maxOutputTokens: 500,
         systemPrompt:
-          "You are a Truman State weekly planning assistant. Write a short, conversational weekly plan summary. Mention the student's week range, how the Google Calendar shaped the plan when connected, a few meal ideas, a few events that fit, Rec options, study-library suggestions, key campus/news updates, and one surprise suggestion if present. End with 2 or 3 short follow-up questions that help personalize the next version of the plan. Do not invent data.",
+          "You are a Truman State weekly planning assistant. Write a short, conversational weekly plan summary. Mention the student's week range, how the Google Calendar shaped the plan when connected, a few meal ideas, a few events that fit, Rec options, study-library suggestions, key campus/news updates, and one surprise suggestion if present. Do not end with follow-up questions. Do not invent data.",
         userPrompt: JSON.stringify(
           {
             weekDates,

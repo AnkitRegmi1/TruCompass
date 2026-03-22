@@ -3,8 +3,9 @@ import { randomUUID } from "node:crypto";
 const MAX_TURNS = 16;
 
 export class ConversationStoreService {
-  constructor({ cache }) {
+  constructor({ cache, store = null }) {
     this.cache = cache;
+    this.store = store;
   }
 
   async getConversation(conversationId) {
@@ -12,6 +13,15 @@ export class ConversationStoreService {
       return {
         conversationId: randomUUID(),
         messages: [],
+      };
+    }
+
+    if (this.store?.getConversation) {
+      const storedConversation = await this.store.getConversation(conversationId);
+
+      return {
+        conversationId,
+        messages: storedConversation?.messages ?? [],
       };
     }
 
@@ -24,8 +34,16 @@ export class ConversationStoreService {
   }
 
   async appendTurn(conversationId, userText, assistantText) {
-    const conversations = (await this.cache.read()) ?? {};
-    const existingMessages = conversations[conversationId]?.messages ?? [];
+    let existingMessages = [];
+
+    if (this.store?.getConversation) {
+      existingMessages =
+        (await this.store.getConversation(conversationId))?.messages ?? [];
+    } else {
+      const conversations = (await this.cache.read()) ?? {};
+      existingMessages = conversations[conversationId]?.messages ?? [];
+    }
+
     const nextMessages = [
       ...existingMessages,
       {
@@ -40,12 +58,18 @@ export class ConversationStoreService {
       },
     ].slice(-MAX_TURNS);
 
-    conversations[conversationId] = {
+    const conversationPayload = {
       messages: nextMessages,
       updatedAt: Date.now(),
     };
 
-    await this.cache.write(conversations);
+    if (this.store?.saveConversation) {
+      await this.store.saveConversation(conversationId, null, conversationPayload);
+    } else {
+      const conversations = (await this.cache.read()) ?? {};
+      conversations[conversationId] = conversationPayload;
+      await this.cache.write(conversations);
+    }
 
     return nextMessages;
   }

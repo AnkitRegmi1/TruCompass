@@ -4,6 +4,7 @@ const DEFAULT_PREFERENCES = {
   dislikedFoods: [],
   favoriteEventTypes: [],
   preferredRecActivities: [],
+  recSessionsPerWeek: 0,
   preferredRecTime: "",
   preferredRecCrowd: "",
   wantsRecClasses: null,
@@ -49,6 +50,7 @@ function normalizePreferences(preferences = {}) {
     dislikedFoods: uniqueValues(preferences.dislikedFoods),
     favoriteEventTypes: uniqueValues(preferences.favoriteEventTypes),
     preferredRecActivities: uniqueValues(preferences.preferredRecActivities),
+    recSessionsPerWeek: Number(preferences.recSessionsPerWeek ?? 0) || 0,
     preferredRecTime: String(preferences.preferredRecTime ?? "").trim(),
     preferredRecCrowd: String(preferences.preferredRecCrowd ?? "").trim(),
     wantsRecClasses,
@@ -68,13 +70,21 @@ function normalizePreferences(preferences = {}) {
 }
 
 export class UserPreferencesService {
-  constructor({ cache }) {
+  constructor({ cache, store = null }) {
     this.cache = cache;
+    this.store = store;
   }
 
   async getPreferences(userId) {
     if (!userId) {
       return { ...DEFAULT_PREFERENCES };
+    }
+
+    if (this.store?.getPreferences) {
+      return {
+        ...DEFAULT_PREFERENCES,
+        ...normalizePreferences((await this.store.getPreferences(userId)) ?? {}),
+      };
     }
 
     const payload = (await this.cache.read()) ?? {};
@@ -89,20 +99,25 @@ export class UserPreferencesService {
       throw new Error("userId is required to save planner preferences.");
     }
 
-    const payload = (await this.cache.read()) ?? {};
+    const current = await this.getPreferences(userId);
     const merged = {
-      ...(await this.getPreferences(userId)),
+      ...current,
       ...normalizePreferences(preferences),
       preferredMealWindows: mergeMealWindows(
-        (await this.getPreferences(userId)).preferredMealWindows,
+        current.preferredMealWindows,
         preferences?.preferredMealWindows,
       ),
     };
 
-    await this.cache.write({
-      ...payload,
-      [userId]: merged,
-    });
+    if (this.store?.savePreferences) {
+      await this.store.savePreferences(userId, merged);
+    } else {
+      const payload = (await this.cache.read()) ?? {};
+      await this.cache.write({
+        ...payload,
+        [userId]: merged,
+      });
+    }
 
     return merged;
   }
@@ -132,6 +147,8 @@ export class UserPreferencesService {
         ...current.preferredRecActivities,
         ...(preferences?.preferredRecActivities ?? []),
       ]),
+      recSessionsPerWeek:
+        Number(preferences?.recSessionsPerWeek ?? 0) || current.recSessionsPerWeek || 0,
       preferredRecTime:
         preferences?.preferredRecTime ?? current.preferredRecTime ?? "",
       preferredRecCrowd:
